@@ -25,6 +25,10 @@ def received_msg_keyboard(sender_hash: str) -> InlineKeyboardMarkup:
     ])
 
 
+# алиас для обратной совместимости
+block_sender_keyboard = received_msg_keyboard
+
+
 def confirm_block_keyboard(sender_hash: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
