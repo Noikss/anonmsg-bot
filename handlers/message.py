@@ -70,7 +70,7 @@ async def handle_any_message(message: Message, bot: Bot, state: FSMContext):
             sender_id = await get_sender_id(message.from_user.id, sender_hash)
             logger.info(f"get_sender_id({message.from_user.id}, {sender_hash}) = {sender_id}")
             if sender_id:
-                header = "↩️ <b>Ответ на твоё анонимное сообщение</b>\n\n"
+                header = f"↩️ <b>Ответ на твоё анонимное сообщение</b>\n<code>#{sender_hash[:8]}</code>\n\n"
                 try:
                     await send_to_receiver(bot, sender_id, sender_hash, message, header)
                     await message.answer("✅ Ответ отправлен.")
