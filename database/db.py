@@ -116,8 +116,8 @@ async def save_sender_map(receiver_id: int, sender_hash: str, sender_id: int):
 async def get_sender_id(receiver_id: int, sender_hash: str):
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT sender_id FROM sender_map WHERE receiver_id = ? AND sender_hash = ?",
-            (receiver_id, sender_hash)
+            "SELECT sender_id FROM sender_map WHERE receiver_id = ? AND sender_hash LIKE ?",
+            (receiver_id, sender_hash + "%")
         ) as cursor:
             row = await cursor.fetchone()
             return row[0] if row else None
