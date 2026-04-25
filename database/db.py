@@ -1,216 +1,132 @@
-import logging
-from aiogram import Router, Bot, F
-from aiogram.types import Message, CallbackQuery
-from aiogram.fsm.context import FSMContext
+import aiosqlite
+import os
+from pathlib import Path
 
-from database.db import (
-    get_user, save_message, is_sender_blocked,
-    save_sender_map, get_sender_id
-)
-from keyboards.inline import (
-    block_sender_keyboard, confirm_block_keyboard,
-    main_menu, share_link_keyboard
-)
-from utils.helpers import hash_sender
-
-router = Router()
-logger = logging.getLogger(__name__)
+DATA_DIR = Path("/app/data")
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+DB_PATH = str(DATA_DIR / "anonmsg.db")
 
 
-async def send_to_receiver(bot: Bot, receiver_id: int, sender_hash: str,
-                           message: Message, header: str):
-    kb = block_sender_keyboard(sender_hash)
+async def init_db():
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id     INTEGER PRIMARY KEY,
+                username    TEXT,
+                full_name   TEXT,
+                link_token  TEXT UNIQUE,
+                is_blocked  INTEGER DEFAULT 0,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                receiver_id INTEGER,
+                sender_hash TEXT,
+                content     TEXT,
+                media_type  TEXT,
+                file_id     TEXT,
+                is_read     INTEGER DEFAULT 0,
+                created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (receiver_id) REFERENCES users(user_id)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS blocked_senders (
+                receiver_id INTEGER,
+                sender_hash TEXT,
+                PRIMARY KEY (receiver_id, sender_hash)
+            )
+        """)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sender_map (
+                receiver_id INTEGER,
+                sender_hash TEXT,
+                sender_id   INTEGER,
+                PRIMARY KEY (receiver_id, sender_hash)
+            )
+        """)
+        await db.commit()
 
-    if message.text:
-        await bot.send_message(receiver_id, header + message.text, parse_mode="HTML", reply_markup=kb)
-    elif message.photo:
-        await bot.send_photo(receiver_id, message.photo[-1].file_id,
-                             caption=header + (message.caption or ""), parse_mode="HTML", reply_markup=kb)
-    elif message.voice:
-        await bot.send_voice(receiver_id, message.voice.file_id)
-        await bot.send_message(receiver_id, header, parse_mode="HTML", reply_markup=kb)
-    elif message.video:
-        await bot.send_video(receiver_id, message.video.file_id,
-                             caption=header + (message.caption or ""), parse_mode="HTML", reply_markup=kb)
-    elif message.document:
-        await bot.send_document(receiver_id, message.document.file_id,
-                                caption=header + (message.caption or ""), parse_mode="HTML", reply_markup=kb)
-    elif message.sticker:
-        await bot.send_sticker(receiver_id, message.sticker.file_id)
-        await bot.send_message(receiver_id, header, parse_mode="HTML", reply_markup=kb)
-    elif message.video_note:
-        await bot.send_video_note(receiver_id, message.video_note.file_id)
-        await bot.send_message(receiver_id, header, parse_mode="HTML", reply_markup=kb)
-    else:
-        return False
-    return True
+
+async def get_user(user_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM users WHERE user_id = ?", (user_id,)
+        ) as cursor:
+            return await cursor.fetchone()
 
 
-@router.message(F.func(lambda m: True))
-async def handle_any_message(message: Message, bot: Bot, state: FSMContext):
-    data = await state.get_data()
-    current_state = await state.get_state()
-
-    # --- Ответ на анонимное сообщение через Reply ---
-    if message.reply_to_message and current_state != "sending":
-        reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
-        logger.info(f"REPLY detected. reply_text={repr(reply_text)}")
-
-        sender_hash = None
-        for line in reply_text.split("\n"):
-            line = line.strip()
-            logger.info(f"  line={repr(line)} startswith#={line.startswith('#')} len={len(line)}")
-            if line.startswith("#") and len(line) == 9:
-                sender_hash = line[1:]
-                break
-
-        logger.info(f"sender_hash extracted={sender_hash}")
-
-        if sender_hash:
-            sender_id = await get_sender_id(message.from_user.id, sender_hash)
-            logger.info(f"get_sender_id({message.from_user.id}, {sender_hash}) = {sender_id}")
-            if sender_id:
-                header = f"↩️ <b>Ответ на твоё анонимное сообщение</b>\n<code>#{sender_hash[:8]}</code>\n\n"
-                try:
-                    await send_to_receiver(bot, sender_id, sender_hash, message, header)
-                    await message.answer("✅ Ответ отправлен.")
-                except Exception as e:
-                    logger.error(f"send error: {e}")
-                    await message.answer("❌ Не удалось отправить — пользователь заблокировал бота.")
-                return
-            else:
-                await message.answer("❌ Не могу найти отправителя — данные устарели.")
-                return
-        else:
-            logger.info("sender_hash not found in reply_text")
-
-    # --- Режим отправки анонимного сообщения ---
-    if current_state == "sending":
-        receiver_id = data.get("receiver_id")
-        sender_hash = hash_sender(message.from_user.id, receiver_id)
-        logger.info(f"SENDING: from={message.from_user.id} to={receiver_id} hash={sender_hash}")
-
-        if await is_sender_blocked(receiver_id, sender_hash):
-            await message.answer("🚫 Получатель заблокировал тебя.")
-            return
-
-        await save_sender_map(receiver_id, sender_hash, message.from_user.id)
-        logger.info(f"save_sender_map done: receiver={receiver_id} hash={sender_hash} sender={message.from_user.id}")
-
-        text_content = message.text or message.caption or ""
-        media_type = None
-        file_id = None
-        if message.photo:
-            media_type, file_id = "photo", message.photo[-1].file_id
-        elif message.voice:
-            media_type, file_id = "voice", message.voice.file_id
-        elif message.video:
-            media_type, file_id = "video", message.video.file_id
-        elif message.document:
-            media_type, file_id = "document", message.document.file_id
-        elif message.sticker:
-            media_type, file_id = "sticker", message.sticker.file_id
-        elif message.video_note:
-            media_type, file_id = "video_note", message.video_note.file_id
-        elif not message.text:
-            await message.answer("❌ Этот тип сообщений не поддерживается.")
-            return
-
-        await save_message(receiver_id, sender_hash, text_content, media_type, file_id)
-
-        header = f"💌 <b>Анонимное сообщение</b>\n<code>#{sender_hash[:8]}</code>\n\n"
-        try:
-            ok = await send_to_receiver(bot, receiver_id, sender_hash, message, header)
-            if ok:
-                await message.answer("✅ Сообщение отправлено анонимно!")
-            else:
-                await message.answer("❌ Этот тип сообщений не поддерживается.")
-        except Exception as e:
-            logger.error(f"deliver error: {e}")
-            await message.answer("❌ Не удалось доставить сообщение.")
-
-        await state.clear()
-        return
-
-    # --- Главное меню ---
-    user = await get_user(message.from_user.id)
-    if user:
-        me = await bot.get_me()
-        link = f"https://t.me/{me.username}?start={user['link_token']}"
-        await message.answer(
-            f"🔗 Твоя ссылка:\n<code>{link}</code>\n\nПоделись ей — и тебе напишут анонимно.",
-            parse_mode="HTML",
-            reply_markup=main_menu(me.username, user["link_token"])
+async def create_user(user_id: int, username: str, full_name: str, token: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO users (user_id, username, full_name, link_token) VALUES (?, ?, ?, ?)",
+            (user_id, username, full_name, token)
         )
+        await db.commit()
 
 
-# --- Callbacks ---
-
-@router.callback_query(F.data == "my_link")
-async def cb_my_link(call: CallbackQuery, bot: Bot):
-    user = await get_user(call.from_user.id)
-    me = await bot.get_me()
-    link = f"https://t.me/{me.username}?start={user['link_token']}"
-    await call.message.edit_text(
-        f"🔗 Твоя анонимная ссылка:\n\n<code>{link}</code>\n\nОтправь её в соцсетях или друзьям.",
-        parse_mode="HTML",
-        reply_markup=share_link_keyboard(me.username, user["link_token"])
-    )
-    await call.answer()
+async def get_user_by_token(token: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM users WHERE link_token = ?", (token,)
+        ) as cursor:
+            return await cursor.fetchone()
 
 
-@router.callback_query(F.data == "back_main")
-async def cb_back_main(call: CallbackQuery, bot: Bot):
-    user = await get_user(call.from_user.id)
-    me = await bot.get_me()
-    link = f"https://t.me/{me.username}?start={user['link_token']}"
-    await call.message.edit_text(
-        f"🔗 Твоя ссылка:\n<code>{link}</code>",
-        parse_mode="HTML",
-        reply_markup=main_menu(me.username, user["link_token"])
-    )
-    await call.answer()
+async def save_message(receiver_id: int, sender_hash: str, content: str, media_type: str = None, file_id: str = None):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO messages (receiver_id, sender_hash, content, media_type, file_id) VALUES (?, ?, ?, ?, ?)",
+            (receiver_id, sender_hash, content, media_type, file_id)
+        )
+        await db.commit()
 
 
-@router.callback_query(F.data == "my_stats")
-async def cb_my_stats(call: CallbackQuery):
-    from database.db import DB_PATH
-    import aiosqlite
+async def is_sender_blocked(receiver_id: int, sender_hash: str) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT COUNT(*) FROM messages WHERE receiver_id = ?", (call.from_user.id,)
-        ) as cur:
-            total = (await cur.fetchone())[0]
+            "SELECT 1 FROM blocked_senders WHERE receiver_id = ? AND sender_hash = ?",
+            (receiver_id, sender_hash)
+        ) as cursor:
+            return await cursor.fetchone() is not None
+
+
+async def block_sender(receiver_id: int, sender_hash: str):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO blocked_senders (receiver_id, sender_hash) VALUES (?, ?)",
+            (receiver_id, sender_hash)
+        )
+        await db.commit()
+
+
+async def save_sender_map(receiver_id: int, sender_hash: str, sender_id: int):
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT OR IGNORE INTO sender_map (receiver_id, sender_hash, sender_id) VALUES (?, ?, ?)",
+            (receiver_id, sender_hash, sender_id)
+        )
+        await db.commit()
+
+
+async def get_sender_id(receiver_id: int, sender_hash: str):
+    async with aiosqlite.connect(DB_PATH) as db:
         async with db.execute(
-            "SELECT COUNT(*) FROM messages WHERE receiver_id = ? AND is_read = 0", (call.from_user.id,)
-        ) as cur:
-            unread = (await cur.fetchone())[0]
-    await call.answer(
-        f"📊 Всего сообщений: {total}\n📬 Непрочитанных: {unread}",
-        show_alert=True
-    )
+            "SELECT sender_id FROM sender_map WHERE receiver_id = ? AND sender_hash LIKE ?",
+            (receiver_id, sender_hash + "%")
+        ) as cursor:
+            row = await cursor.fetchone()
+            return row[0] if row else None
 
 
-@router.callback_query(F.data.startswith("block:"))
-async def cb_block(call: CallbackQuery):
-    sender_hash = call.data.split(":")[1]
-    await call.message.reply(
-        "Заблокировать этого отправителя? Он больше не сможет писать тебе.",
-        reply_markup=confirm_block_keyboard(sender_hash)
-    )
-    await call.answer()
-
-
-@router.callback_query(F.data.startswith("block_confirm:"))
-async def cb_block_confirm(call: CallbackQuery):
-    sender_hash = call.data.split(":")[1]
-    from database.db import block_sender
-    await block_sender(call.from_user.id, sender_hash)
-    await call.message.edit_text("🚫 Отправитель заблокирован.")
-    await call.answer("Заблокировано", show_alert=False)
-
-
-@router.callback_query(F.data == "block_cancel")
-async def cb_block_cancel(call: CallbackQuery):
-    await call.message.delete()
-    await call.answer("Отменено")
+async def get_stats():
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute("SELECT COUNT(*) FROM users") as cur:
+            users = (await cur.fetchone())[0]
+        async with db.execute("SELECT COUNT(*) FROM messages") as cur:
+            msgs = (await cur.fetchone())[0]
+        return users, msgs
