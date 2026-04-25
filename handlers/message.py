@@ -1,3 +1,4 @@
+import logging
 from aiogram import Router, Bot, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
@@ -13,6 +14,7 @@ from keyboards.inline import (
 from utils.helpers import hash_sender
 
 router = Router()
+logger = logging.getLogger(__name__)
 
 
 async def send_to_receiver(bot: Bot, receiver_id: int, sender_hash: str,
@@ -52,38 +54,48 @@ async def handle_any_message(message: Message, bot: Bot, state: FSMContext):
     # --- Ответ на анонимное сообщение через Reply ---
     if message.reply_to_message and current_state != "sending":
         reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
+        logger.info(f"REPLY detected. reply_text={repr(reply_text)}")
 
         sender_hash = None
         for line in reply_text.split("\n"):
             line = line.strip()
+            logger.info(f"  line={repr(line)} startswith#={line.startswith('#')} len={len(line)}")
             if line.startswith("#") and len(line) == 9:
                 sender_hash = line[1:]
                 break
 
+        logger.info(f"sender_hash extracted={sender_hash}")
+
         if sender_hash:
             sender_id = await get_sender_id(message.from_user.id, sender_hash)
+            logger.info(f"get_sender_id({message.from_user.id}, {sender_hash}) = {sender_id}")
             if sender_id:
                 header = "↩️ <b>Ответ на твоё анонимное сообщение</b>\n\n"
                 try:
                     await send_to_receiver(bot, sender_id, sender_hash, message, header)
                     await message.answer("✅ Ответ отправлен.")
-                except Exception:
+                except Exception as e:
+                    logger.error(f"send error: {e}")
                     await message.answer("❌ Не удалось отправить — пользователь заблокировал бота.")
                 return
             else:
                 await message.answer("❌ Не могу найти отправителя — данные устарели.")
                 return
+        else:
+            logger.info("sender_hash not found in reply_text")
 
     # --- Режим отправки анонимного сообщения ---
     if current_state == "sending":
         receiver_id = data.get("receiver_id")
         sender_hash = hash_sender(message.from_user.id, receiver_id)
+        logger.info(f"SENDING: from={message.from_user.id} to={receiver_id} hash={sender_hash}")
 
         if await is_sender_blocked(receiver_id, sender_hash):
             await message.answer("🚫 Получатель заблокировал тебя.")
             return
 
         await save_sender_map(receiver_id, sender_hash, message.from_user.id)
+        logger.info(f"save_sender_map done: receiver={receiver_id} hash={sender_hash} sender={message.from_user.id}")
 
         text_content = message.text or message.caption or ""
         media_type = None
@@ -113,7 +125,8 @@ async def handle_any_message(message: Message, bot: Bot, state: FSMContext):
                 await message.answer("✅ Сообщение отправлено анонимно!")
             else:
                 await message.answer("❌ Этот тип сообщений не поддерживается.")
-        except Exception:
+        except Exception as e:
+            logger.error(f"deliver error: {e}")
             await message.answer("❌ Не удалось доставить сообщение.")
 
         await state.clear()
