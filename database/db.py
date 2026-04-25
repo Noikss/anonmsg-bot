@@ -115,12 +115,23 @@ async def save_sender_map(receiver_id: int, sender_hash: str, sender_id: int):
 
 async def get_sender_id(receiver_id: int, sender_hash: str):
     async with aiosqlite.connect(DB_PATH) as db:
+        # Ищем прямо: получатель → отправитель
         async with db.execute(
             "SELECT sender_id FROM sender_map WHERE receiver_id = ? AND sender_hash LIKE ?",
             (receiver_id, sender_hash + "%")
         ) as cursor:
             row = await cursor.fetchone()
-            return row[0] if row else None
+            if row:
+                return row[0]
+        # Ищем обратно: отправитель хочет ответить получателю
+        async with db.execute(
+            "SELECT receiver_id FROM sender_map WHERE sender_id = ? AND sender_hash LIKE ?",
+            (receiver_id, sender_hash + "%")
+        ) as cursor:
+            row = await cursor.fetchone()
+            if row:
+                return row[0]
+        return None
 
 
 async def get_stats():
