@@ -146,6 +146,27 @@ async def cb_reply(call: CallbackQuery, state: FSMContext):
         await call.answer("❌ Не могу найти отправителя.", show_alert=True)
         return
 
+    # Проверяем не заблокирован ли
+    from database.db import is_sender_blocked
+    if await is_sender_blocked(call.from_user.id, sender_hash):
+        await call.answer("🚫 Ты заблокировал этого пользователя.", show_alert=True)
+        return
+    # И в обратную сторону — не заблокировал ли получатель нас
+    reverse_hash = None
+    from database.db import DB_PATH
+    import aiosqlite
+    async with aiosqlite.connect(DB_PATH) as db:
+        async with db.execute(
+            "SELECT sender_hash FROM sender_map WHERE sender_id = ? AND receiver_id = ?",
+            (call.from_user.id, sender_id)
+        ) as cur:
+            row = await cur.fetchone()
+            if row:
+                reverse_hash = row[0]
+    if reverse_hash and await is_sender_blocked(sender_id, reverse_hash):
+        await call.answer("🚫 Этот пользователь заблокировал тебя.", show_alert=True)
+        return
+
     await state.set_state(ReplyState.waiting_reply)
     await state.update_data(reply_hash=sender_hash, reply_to_id=sender_id)
     await call.message.answer(
