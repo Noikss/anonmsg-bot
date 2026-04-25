@@ -1,0 +1,4 @@
+import os
+
+BOT_TOKEN = "8468469147:AAEyIFUXSvcHm1riOflvh1X9RyWmOryieeY"
+ADMIN_ID = 7360025537
