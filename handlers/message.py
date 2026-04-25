@@ -2,14 +2,15 @@ import logging
 from aiogram import Router, Bot, F
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
+from aiogram.fsm.state import State, StatesGroup
 
 from database.db import (
     get_user, save_message, is_sender_blocked,
     save_sender_map, get_sender_id
 )
 from keyboards.inline import (
-    block_sender_keyboard, confirm_block_keyboard,
-    main_menu, share_link_keyboard
+    received_msg_keyboard, confirm_block_keyboard,
+    main_menu, share_link_keyboard, cancel_reply_keyboard
 )
 from utils.helpers import hash_sender
 
@@ -17,9 +18,13 @@ router = Router()
 logger = logging.getLogger(__name__)
 
 
+class ReplyState(StatesGroup):
+    waiting_reply = State()
+
+
 async def send_to_receiver(bot: Bot, receiver_id: int, sender_hash: str,
                            message: Message, header: str):
-    kb = block_sender_keyboard(sender_hash)
+    kb = received_msg_keyboard(sender_hash)
 
     if message.text:
         await bot.send_message(receiver_id, header + message.text, parse_mode="HTML", reply_markup=kb)
@@ -51,38 +56,25 @@ async def handle_any_message(message: Message, bot: Bot, state: FSMContext):
     data = await state.get_data()
     current_state = await state.get_state()
 
-    # --- Ответ на анонимное сообщение через Reply ---
-    if message.reply_to_message and current_state != "sending":
-        reply_text = message.reply_to_message.text or message.reply_to_message.caption or ""
-        logger.info(f"REPLY detected. reply_text={repr(reply_text)}")
+    # --- Режим ожидания ответа (нажали кнопку "Ответить") ---
+    if current_state == ReplyState.waiting_reply.state:
+        sender_hash = data.get("reply_hash")
+        sender_id = data.get("reply_to_id")
 
-        sender_hash = None
-        for line in reply_text.split("\n"):
-            line = line.strip()
-            logger.info(f"  line={repr(line)} startswith#={line.startswith('#')} len={len(line)}")
-            if line.startswith("#") and len(line) == 9:
-                sender_hash = line[1:]
-                break
+        if not sender_id:
+            await message.answer("❌ Не удалось найти отправителя.")
+            await state.clear()
+            return
 
-        logger.info(f"sender_hash extracted={sender_hash}")
-
-        if sender_hash:
-            sender_id = await get_sender_id(message.from_user.id, sender_hash)
-            logger.info(f"get_sender_id({message.from_user.id}, {sender_hash}) = {sender_id}")
-            if sender_id:
-                header = f"↩️ <b>Ответ на твоё анонимное сообщение</b>\n<code>#{sender_hash[:8]}</code>\n\n"
-                try:
-                    await send_to_receiver(bot, sender_id, sender_hash, message, header)
-                    await message.answer("✅ Ответ отправлен.")
-                except Exception as e:
-                    logger.error(f"send error: {e}")
-                    await message.answer("❌ Не удалось отправить — пользователь заблокировал бота.")
-                return
-            else:
-                await message.answer("❌ Не могу найти отправителя — данные устарели.")
-                return
-        else:
-            logger.info("sender_hash not found in reply_text")
+        header = f"↩️ <b>Ответ на твоё анонимное сообщение</b>\n<code>#{sender_hash[:8]}</code>\n\n"
+        try:
+            await send_to_receiver(bot, sender_id, sender_hash, message, header)
+            await message.answer("✅ Ответ отправлен.")
+        except Exception as e:
+            logger.error(f"reply send error: {e}")
+            await message.answer("❌ Не удалось отправить.")
+        await state.clear()
+        return
 
     # --- Режим отправки анонимного сообщения ---
     if current_state == "sending":
@@ -95,7 +87,6 @@ async def handle_any_message(message: Message, bot: Bot, state: FSMContext):
             return
 
         await save_sender_map(receiver_id, sender_hash, message.from_user.id)
-        logger.info(f"save_sender_map done: receiver={receiver_id} hash={sender_hash} sender={message.from_user.id}")
 
         text_content = message.text or message.caption or ""
         media_type = None
@@ -145,6 +136,31 @@ async def handle_any_message(message: Message, bot: Bot, state: FSMContext):
 
 
 # --- Callbacks ---
+
+@router.callback_query(F.data.startswith("reply:"))
+async def cb_reply(call: CallbackQuery, state: FSMContext):
+    sender_hash = call.data.split(":")[1]
+    sender_id = await get_sender_id(call.from_user.id, sender_hash)
+
+    if not sender_id:
+        await call.answer("❌ Не могу найти отправителя.", show_alert=True)
+        return
+
+    await state.set_state(ReplyState.waiting_reply)
+    await state.update_data(reply_hash=sender_hash, reply_to_id=sender_id)
+    await call.message.answer(
+        "✏️ Напиши ответ — отправлю анонимно:",
+        reply_markup=cancel_reply_keyboard()
+    )
+    await call.answer()
+
+
+@router.callback_query(F.data == "cancel_reply")
+async def cb_cancel_reply(call: CallbackQuery, state: FSMContext):
+    await state.clear()
+    await call.message.edit_text("❌ Ответ отменён.")
+    await call.answer()
+
 
 @router.callback_query(F.data == "my_link")
 async def cb_my_link(call: CallbackQuery, bot: Bot):
