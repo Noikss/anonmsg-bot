@@ -210,23 +210,46 @@ async def cb_my_stats(call: CallbackQuery):
 @router.callback_query(F.data.startswith("block:"))
 async def cb_block(call: CallbackQuery):
     sender_hash = call.data.split(":")[1]
-    await call.message.reply(
-        "Заблокировать этого отправителя? Он больше не сможет писать тебе.",
+    await call.message.edit_reply_markup(
         reply_markup=confirm_block_keyboard(sender_hash)
     )
     await call.answer()
 
 
 @router.callback_query(F.data.startswith("block_confirm:"))
-async def cb_block_confirm(call: CallbackQuery):
+async def cb_block_confirm(call: CallbackQuery, bot: Bot):
     sender_hash = call.data.split(":")[1]
-    from database.db import block_sender
+    from database.db import block_sender, get_sender_id
     await block_sender(call.from_user.id, sender_hash)
+
+    # Уведомляем заблокированного
+    sender_id = await get_sender_id(call.from_user.id, sender_hash)
+    if sender_id:
+        try:
+            await bot.send_message(
+                sender_id,
+                "🚫 Пользователь заблокировал тебя. Ты больше не можешь отправлять ему сообщения."
+            )
+        except Exception:
+            pass
+
     await call.message.edit_text("🚫 Отправитель заблокирован.")
     await call.answer("Заблокировано", show_alert=False)
 
 
 @router.callback_query(F.data == "block_cancel")
 async def cb_block_cancel(call: CallbackQuery):
-    await call.message.delete()
+    # Восстанавливаем исходные кнопки
+    # Достаём hash из текста сообщения
+    text = call.message.text or call.message.caption or ""
+    sender_hash = None
+    for line in text.split("\n"):
+        line = line.strip()
+        if line.startswith("#") and len(line) == 9:
+            sender_hash = line[1:]
+            break
+    if sender_hash:
+        await call.message.edit_reply_markup(reply_markup=received_msg_keyboard(sender_hash))
+    else:
+        await call.message.edit_reply_markup(reply_markup=None)
     await call.answer("Отменено")
