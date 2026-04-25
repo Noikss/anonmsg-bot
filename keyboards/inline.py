@@ -18,9 +18,10 @@ def share_link_keyboard(bot_username: str, token: str) -> InlineKeyboardMarkup:
     ])
 
 
-def block_sender_keyboard(sender_hash: str) -> InlineKeyboardMarkup:
+def received_msg_keyboard(sender_hash: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🚫 Заблокировать отправителя", callback_data=f"block:{sender_hash}")],
+        [InlineKeyboardButton(text="↩️ Ответить", callback_data=f"reply:{sender_hash}")],
+        [InlineKeyboardButton(text="🚫 Заблокировать", callback_data=f"block:{sender_hash}")],
     ])
 
 
@@ -30,4 +31,10 @@ def confirm_block_keyboard(sender_hash: str) -> InlineKeyboardMarkup:
             InlineKeyboardButton(text="✅ Да, заблокировать", callback_data=f"block_confirm:{sender_hash}"),
             InlineKeyboardButton(text="❌ Отмена", callback_data="block_cancel"),
         ]
+    ])
+
+
+def cancel_reply_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_reply")],
     ])
